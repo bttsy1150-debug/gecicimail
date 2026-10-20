@@ -1,0 +1,78 @@
+name: GeçiciMail CI/CD Doğrulama Hattı
+
+on:
+  push:
+    branches: [ main, master, develop ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Depoyu Klonla (Checkout)
+        uses: actions/checkout@v4
+
+      - name: Node.js Kurulumu
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'yarn'
+          cache-dependency-path: 'frontend/yarn.lock'
+
+      - name: Bağımlılıkları Yükle (Frontend)
+        working-directory: ./frontend
+        run: yarn install --frozen-lockfile
+
+      - name: Frontend Typecheck Kontrolü
+        working-directory: ./frontend
+        run: yarn typecheck
+
+      - name: Public API Smoke Testini Koştur
+        run: |
+          set -euo pipefail
+          BASE="https://emergentagent.com"
+          echo "SMOKE TEST: $BASE"
+          
+          ROOT=$(curl -sS -w '\n%{http_code}' "$BASE/api/")
+          ROOT_CODE=${ROOT##*$'\n'}; ROOT_BODY=${ROOT%$'\n'*}
+          test "$ROOT_CODE" = "200"; echo "$ROOT_BODY" | grep -q 'mail.tm'
+          
+          PROVIDER=$(curl -sS -w '\n%{http_code}' "$BASE/api/provider/status")
+          PROVIDER_CODE=${PROVIDER##*$'\n'}; PROVIDER_BODY=${PROVIDER%$'\n'*}
+          test "$PROVIDER_CODE" = "200"; echo "$PROVIDER_BODY" | grep -q 'online'
+          
+          CREATED=$(curl -sS -w '\n%{http_code}' -X POST "$BASE/api/mailboxes" -H 'content-type: application/json' -d '{}')
+          CREATED_CODE=${CREATED##*$'\n'}; CREATED_BODY=${CREATED%$'\n'*}
+          test "$CREATED_CODE" = "201"; echo "$CREATED_BODY" | grep -q 'address'
+          
+          MAILBOX_ID=$(printf '%s' "$CREATED_BODY" | python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])')
+          
+          MESSAGES=$(curl -sS -w '\n%{http_code}' "$BASE/api/mailboxes/$MAILBOX_ID/messages")
+          MESSAGES_CODE=${MESSAGES##*$'\n'}; MESSAGES_BODY=${MESSAGES%$'\n'*}
+          test "$MESSAGES_CODE" = "200"; echo "$MESSAGES_BODY" | grep -q 'items'
+          
+          NEGATIVE=$(curl -sS -w '\n%{http_code}' "$BASE/api/mailboxes/not-a-real-mailbox/messages")
+          NEGATIVE_CODE=${NEGATIVE##*$'\n'}; NEGATIVE_BODY=${NEGATIVE%$'\n'*}
+          test "$NEGATIVE_CODE" = "404"; echo "$NEGATIVE_BODY" | grep -q 'detail'
+          
+          echo "PASS: Tüm API uç noktaları başarıyla doğrulandı."
+
+      - name: Playwright Tarayıcı Bağımlılıklarını Kur
+        working-directory: ./frontend
+        run: npx playwright install --with-deps chromium
+
+      - name: Gerçek Tarayıcı Happy-Path Akışını Çalıştır
+        working-directory: ./frontend
+        run: npx playwright test
+
+      - name: Test Raporlarını ve Ekran Görüntülerini Yükle (Artifact)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-test-results
+          path: |
+            frontend/playwright-report/
+            frontend/.screenshots/
+          retention-days: 14
